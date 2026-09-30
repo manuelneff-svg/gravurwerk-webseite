@@ -4,6 +4,7 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import re
+import asyncio
 import ipaddress
 import logging
 import uuid
@@ -12,7 +13,7 @@ from html import escape
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 from pathlib import Path
-from pydantic import BaseModel, Field, EmailStr, ConfigDict
+from pydantic import BaseModel, Field, EmailStr, ConfigDict, field_validator
 from typing import List, Optional
 from datetime import datetime, timezone
 
@@ -120,14 +121,24 @@ async def send_email(*, to: str, subject: str, html: str, reply_to: Optional[str
     payload = {"to": [to], "subject": subject, "html": html, "from_name": EMAIL_FROM_NAME}
     if reply_to:
         payload["contact_email"] = reply_to
-    async with httpx.AsyncClient(timeout=30) as http_client:
-        resp = await http_client.post(
-            f"{EMAIL_BASE_URL}/api/v1/email/send",
-            headers={"X-Email-Key": EMAIL_KEY},
-            json=payload,
-        )
-    resp.raise_for_status()
-    return resp.json().get("id")
+    last_exc = None
+    for attempt in range(4):
+        async with httpx.AsyncClient(timeout=30) as http_client:
+            resp = await http_client.post(
+                f"{EMAIL_BASE_URL}/api/v1/email/send",
+                headers={"X-Email-Key": EMAIL_KEY},
+                json=payload,
+            )
+        if resp.status_code == 429:
+            # Transient provider throttling: back off and retry.
+            wait = min(2 ** attempt, 6)
+            logger.warning(f"Email 429 (attempt {attempt + 1}) for {to}, retrying in {wait}s")
+            last_exc = httpx.HTTPStatusError("429", request=resp.request, response=resp)
+            await asyncio.sleep(wait)
+            continue
+        resp.raise_for_status()
+        return resp.json().get("id")
+    raise last_exc
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +149,13 @@ class InquiryCreate(BaseModel):
     wish: str = Field(..., min_length=1, max_length=4000)
     email: EmailStr
     name: Optional[str] = Field(default=None, max_length=120)
+
+    @field_validator("wish")
+    @classmethod
+    def wish_not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("wish must not be empty")
+        return v.strip()
 
 
 class Inquiry(BaseModel):
@@ -240,15 +258,14 @@ async def create_inquiry(payload: InquiryCreate):
     except Exception as e:
         logger.error(f"Confirmation email failed for inquiry {inq.id}: {e}")
 
-    status = "sent" if owner_sent else "failed"
+    status = "sent" if (owner_sent and customer_sent) else ("sent_no_confirmation" if owner_sent else "failed")
     await db.inquiries.update_one({"id": inq.id}, {"$set": {"email_status": status}})
 
     if not owner_sent:
         raise HTTPException(
             status_code=502,
-            detail="Deine Anfrage wurde gespeichert, aber der E-Mail-Versand ist "
-                   "fehlgeschlagen. Bitte versuche es erneut oder schreib an "
-                   f"{OWNER_EMAIL}.",
+            detail="Deine Anfrage wurde gespeichert, aber der Versand ist gerade "
+                   "fehlgeschlagen. Bitte versuche es in einem Moment noch einmal.",
         )
 
     return {"status": "success", "id": inq.id, "confirmation_sent": customer_sent}

@@ -25,9 +25,17 @@ function App() {
   const [name, setName] = useState("");
   const [status, setStatus] = useState("idle"); // idle | loading | success | error
   const [errorMsg, setErrorMsg] = useState("");
+  const [confirmationSent, setConfirmationSent] = useState(true);
 
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
   const canSubmit = wish.trim().length > 0 && emailValid && status !== "loading";
+
+  const scrollToForm = () => {
+    const el = document.querySelector('[data-testid="inquiry-card"]');
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    const input = document.querySelector('[data-testid="email-input"]');
+    if (input) setTimeout(() => input.focus(), 400);
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -35,12 +43,13 @@ function App() {
     setStatus("loading");
     setErrorMsg("");
     try {
-      await axios.post(`${API}/inquiries`, {
+      const res = await axios.post(`${API}/inquiries`, {
         product,
         wish: wish.trim(),
         email: email.trim(),
         name: name.trim() || null,
       });
+      setConfirmationSent(res?.data?.confirmation_sent !== false);
       setStatus("success");
       toast.success("Anfrage gesendet – wir melden uns innert 24 h.");
       setWish("");
@@ -52,7 +61,7 @@ function App() {
       setErrorMsg(
         typeof detail === "string"
           ? detail
-          : "Senden fehlgeschlagen. Bitte versuche es erneut oder schreib direkt an anfrage@gravurwerkschweiz.ch."
+          : "Senden fehlgeschlagen. Bitte versuche es in einem Moment noch einmal."
       );
     }
   };
@@ -74,11 +83,11 @@ function App() {
               <span className="gw-brand-accent">SCHWEIZ</span>
             </span>
           </div>
-          <button className="gw-cta-pill" data-testid="header-cta-button">
+          <button className="gw-cta-pill" onClick={scrollToForm} data-testid="header-cta-button">
             <Zap size={18} strokeWidth={2.5} />
             Jetzt anfragen
           </button>
-          <button className="gw-menu" aria-label="Menü" data-testid="menu-button">
+          <button className="gw-menu" aria-label="Zum Formular" onClick={scrollToForm} data-testid="menu-button">
             <Menu size={26} />
           </button>
         </div>
@@ -156,7 +165,11 @@ function App() {
                 <CheckCircle2 size={22} />
                 <div>
                   <strong>Anfrage gesendet</strong>
-                  <p>Danke! Wir haben dir eine Bestätigung geschickt und melden uns innert 24 h.</p>
+                  <p>
+                    {confirmationSent
+                      ? "Danke! Wir haben dir eine Bestätigung geschickt und melden uns innert 24 h."
+                      : "Danke! Deine Anfrage ist bei uns eingegangen – wir melden uns innert 24 h."}
+                  </p>
                 </div>
               </div>
             )}
